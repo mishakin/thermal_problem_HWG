@@ -1,0 +1,397 @@
+real cpu=clock();
+verbosity=1;
+// constants
+
+real cl = 299.792458;// mm/ns
+
+real rexternal = 5.5; // mm
+
+// calculation parameters
+
+real meshSize = 0.1; // mesh size, mm
+
+
+real hCoeff = 3e-2; //W /(C * mm^2)
+real Tinf = 30; // degrees
+
+
+real r0 = 1.43; // mm
+real d = 3.04; // mm
+real l0 = 0.27; // mm
+int mb = 3;
+
+int Nz = 512; // global value!
+int NHarm = 12; // global value!
+
+real alpha = 2 * pi / (d *  mb);
+
+real kappa0 = 0.37; // W / (K * mm)
+
+
+real conductivityTimesWorseThanPureCu = 2.;
+real conductivityThermalCoefficient = 0.003862;
+
+real dutyCycle = 50. / 350.;
+
+
+real freq = 9.5e10; //Hz
+
+
+// real part of the surface impedance calculation
+real mu0 = 1.256637e-6;
+real rho0 = 1.68e-8 * conductivityTimesWorseThanPureCu;
+
+func real rhoFunc(real temp)
+{
+	return rho0 * (1 + conductivityThermalCoefficient * (temp - 20.));
+}
+
+
+//  =========== Twist factor calculation ============
+
+func real rb(real fi)
+{
+	return r0 + l0 * cos(mb * fi);
+}
+
+func real rbSt(real fi)
+{
+	return -l0 * mb * sin(mb * fi);
+}
+
+func real twistFactor(real fi)
+{
+	real result;
+	result = 1 + alpha^2 * (rb(fi) * rbSt(fi))^2 / (rb(fi)^2 + rbSt(fi)^2);
+	return sqrt(result);
+}
+
+func real twistFactorVsXY(real xx, real yy)
+{
+	real ang = atan2(yy, xx);
+	return twistFactor(ang);
+}
+
+
+//=============================================================//
+
+// ********************************************************** \\
+// ******************* auxilary functions ******************* \\
+// ********************************************************** \\
+
+// Direct Fourier transform
+func complex toFourier(real[int] valsZ, int nHarm)
+{
+	complex result = 0;
+	for(int iz = 0; iz < Nz - 1; ++iz)
+	{
+		result += 0.5 / (Nz - 1) * (valsZ[iz] * exp((-1i * 2. * pi * iz * nHarm) / Nz) +
+						valsZ[iz + 1] * exp((-1i * 2. * pi * (iz + 1.) * nHarm) / Nz));
+	}
+	return result;
+}
+
+func int kronekerDelta(int m, int n)
+{
+	if(m == n)
+		return 1;
+	else
+		return 0;
+}
+
+
+func int copy2Dto1D(real[int, int] from, real[int] to, int col) // copy i-th colume of a 2D real space array
+{
+	for(int i = 0; i < Nz; ++i)
+		to(i) = from(i, col);
+	return 0;
+}
+
+
+func int copy2Dto1D(complex[int, int] from, complex[int] to, int col)
+{
+	for(int i = 0; i < Nz; ++i)
+		to(i) = from(i, col);
+	return 0;
+}
+
+func int copy1Dto2D(real[int] from, real[int, int] to, int col)
+{
+	for(int i = 0; i < Nz; ++i)
+		to(i, col) = from(i);
+	return 0;
+}
+
+
+func int copy1Dto2D(complex[int] from, complex[int, int] to, int col)
+{
+	for(int i = 0; i < Nz; ++i)
+		to(i, col) = from(i);
+	return 0;
+}
+// ********************************************************** \\
+
+
+// Build the geometry //
+
+int internalLabel = 1;
+int externalLabel = 2;
+
+
+border internal(t = 0, 2*pi)
+{
+
+	real r = r0 + l0 * cos(mb * t);
+
+	x = r * cos(t);
+	y = r * sin(t);
+
+	label = internalLabel;
+}
+
+
+border external(t = 0, 2*pi)
+{
+
+	real r = rexternal;
+
+	x = r * cos(t);
+	y = r * sin(t);
+
+	label = externalLabel;
+}
+
+// plot(internal(-100) + external(100));
+
+// --- geometry is built
+
+mesh Th = buildmesh(internal(-1.2 * 2*pi*r0/meshSize) +
+external(2*pi*rexternal/meshSize), nbvx=100000); //generate mesh
+
+// plot(Th);
+
+
+
+fespace Vh(Th, P1); // P1 only, do not change!
+
+// ******** Find global numbers of the node on the internal boundary
+int[int] boundaryNodes(Th.nbe);
+int counter = 0;
+
+for(int i = 0; i < Th.nbe; ++i)
+{
+	if(Th.be(i).label == internalLabel)
+	{
+		boundaryNodes(counter) = Th.be(i)[1];
+		++counter;
+	}
+}
+
+boundaryNodes.resize(counter);
+int NboundaryNodes = counter;
+
+// ******** ******** ******** ******** ******** ********
+
+
+// real space values
+real[int, int] jProfileArr(Nz, NboundaryNodes);
+real[int, int] Pdens2DArr(Nz, NboundaryNodes);
+real[int, int] TdistribBoundary(Nz, NboundaryNodes);
+real[int, int] sigmaDistrib(Nz, NboundaryNodes);
+real[int] tempZArr(Nz);
+
+// spectral space values
+complex[int] PdensSpectrArr(NboundaryNodes); // is calculated for each F-harmonic
+Vh<complex> PdensSpectrFE; // this FE-function represents boundary source Pn
+complex[int, int] TdistribSpectrBoundary(NboundaryNodes, NHarm + 1); // Array of Tn-s
+Vh<complex>[int] Tns(NHarm + 1);
+
+// ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+cout << "NboundaryNodes" << NboundaryNodes << endl;
+
+// ======== Mock surface current distribution, ========
+// ======== later the array will be imported from CST ========
+real L = 23 * d;
+real JmaxVal = 15.; // A / mm^2
+real srcWidth = 3 * d;
+real zSrcPos = 15 * d;
+int mS = 6;
+
+real zCrossSectionPos = zSrcPos;
+
+real[int] zArr(Nz);
+for(int i = 0; i < Nz; ++i)
+	zArr[i] = i * L / (Nz - 1);
+//----
+
+ifstream currentsFile("currents_on_surface_for_ff.txt");
+
+for(int iz = 0; iz < Nz; ++iz)
+{
+	for(int jb = 0; jb < NboundaryNodes; ++jb)
+	{
+		currentsFile >> jProfileArr(iz, jb);
+		cout << "curr=" << jProfileArr(iz, jb) << endl;
+	}
+}
+
+// ------------------==============-------------------------
+
+Vh<complex> T = 0.;
+Vh<complex> psi;
+
+// --------
+
+// solve thermal problem
+int NIterMAX = 100;
+
+// initalize the surface temperature distribution (in real space) with Tinf
+for(int iz = 0; iz < Nz; ++iz)
+	for(int jb = 0; jb < NboundaryNodes; ++jb)
+		TdistribBoundary(iz, jb) = Tinf;
+Vh Tcs; // T distribution in cross-section
+Vh Tcsold;
+
+for(int iIter = 0; iIter < NIterMAX; ++iIter)
+{
+	Tcsold = Tcs;
+	Tcs = 0;
+
+	for(int jHarm = 0; jHarm <= NHarm; ++jHarm)
+	{
+		// calculate Pdens distribution on the surface in real space
+		for(int iz = 0; iz < Nz; ++iz)
+			for(int jb = 0; jb < NboundaryNodes; ++jb)
+			{
+				real Rs = sqrt(rhoFunc(TdistribBoundary(iz, jb)) * pi * freq * mu0);
+				Pdens2DArr(iz, jb) = dutyCycle * 0.5 * Rs * jProfileArr(iz, jb)^2;
+				//cout << "Rs = " << Rs << " " << Pdens2DArr(iz, jb) << endl;
+			}
+
+		// Find Pdens for the current harmonic for each node on the inner surface
+		for(int jb = 0; jb < NboundaryNodes; ++jb)
+		{
+			copy2Dto1D(Pdens2DArr, tempZArr, jb);
+			//cout << "tempZArr = " << tempZArr << endl;
+			PdensSpectrFE[][boundaryNodes(jb)] = toFourier(tempZArr, jHarm);
+			//cout << "toFourier " << toFourier(tempZArr, 1) << endl;
+		}
+
+		Vh<complex> realT;
+
+		real hn = 2 * pi * jHarm / L;
+
+		solve thermalProblem(T, psi) = int2d(Th)(
+
+		// first the matrix elements ...
+		kappa0 * (
+		(1 + alpha^2 * y^2) * dx(psi)*dx(T) +
+		(1 + alpha^2 * x^2) * dy(psi)*dy(T) -
+		alpha^2 * x * y * (dx(psi)*dy(T) + dy(psi)*dx(T))
+
+		+
+
+		1i * hn * alpha * (x * (psi * dy(T) - T * dy(psi)) - y * (psi * dx(T) - T * dx(psi)) )
+
+		+
+
+		hn^2 * psi * T
+				)
+												)
+
+		+
+
+		int1d(Th, external)(hCoeff * T * psi) +
+
+		// .. and then the source
+		int1d(Th, external)(-hCoeff * Tinf * kronekerDelta(jHarm, 0) * psi) +
+		int1d(Th, internal)(-twistFactorVsXY(x, y) * PdensSpectrFE * psi);
+
+		//plot(T, wait=true, value=true, fill=true);
+
+		//filling the 2D cross-section T distribution
+		if(jHarm == 0)
+		{
+			for(int i = 0; i < Vh.ndof; ++i)
+				Tcs[][i] += real(T[][i]);
+
+		}
+		else
+		{
+			for(int i = 0; i < Vh.ndof; ++i)
+				Tcs[][i] += 2. * real(T[][i] * exp(1i * hn * zCrossSectionPos));
+		}
+
+		// filling the array of Tn-s (Tn for n-th harmonic)
+		// Tn cross-sections
+		Tns[jHarm] = T;
+
+		// boundary nodes
+		for(int jb = 0; jb < NboundaryNodes; ++jb)
+		{
+			TdistribSpectrBoundary(jb, jHarm) = T[][boundaryNodes(jb)];
+		}
+	}
+	// restore the temperature distribution on the inner surface
+	for(int iz = 0; iz < Nz; ++iz)
+	{
+		real zPos = iz * L / Nz;
+		for(int jb = 0; jb < NboundaryNodes; ++jb)
+		{
+			TdistribBoundary(iz, jb) = 0;
+			for(int jHarm = 0; jHarm <= NHarm; ++jHarm)
+			{
+				if(jHarm == 0)
+					TdistribBoundary(iz, jb) += real(TdistribSpectrBoundary(jb, jHarm));
+				else
+					TdistribBoundary(iz, jb) += 2 * real(TdistribSpectrBoundary(jb, jHarm) * exp(1i * 2 * pi * jHarm * zPos / L));
+			}
+			//cout << TdistribBoundary(iz, jb)  << endl;
+		}
+	}
+	// plot(Tcs, wait=true, value=true, fill=true);
+
+	real err = 10 * log10(abs(Tcsold - Tcs) / abs(Tcs));
+
+	cout << "err = " << err << endl;
+
+	if(err < -30)
+		break;
+
+}
+
+// convert to 3D solution
+load "gmsh"
+mesh3 Th3D = gmshload3("struct_for_gTWT.msh");
+
+fespace Vh3D(Th3D, P1);
+
+Vh3D u;
+
+
+for(int j = 0; j < Vh3D.ndof; ++j)
+{
+	real xx = Th3D(j).x;
+	real yy = Th3D(j).y;
+	real zz = Th3D(j).z;
+
+	real chi = xx * cos(alpha * zz) + yy * sin(alpha * zz);
+	real gamma = -xx * sin(alpha * zz) + yy * cos(alpha * zz);
+	real zeta = zz;
+
+	real result = 0;
+	for(int i = 0; i <= NHarm; ++i)
+	{
+		complex TnAtNode = Tns[i](chi, gamma);
+
+		if(i == 0)
+			result += real(TnAtNode);
+		else
+			result += 2. * real(TnAtNode * exp(1i * 2 * pi * i * zeta / L));
+	}
+	u[][j] = result;
+}
+
+load "iovtk"
+savevtk("T_fourier_distribution_real_current.vtk", Th3D, u);
