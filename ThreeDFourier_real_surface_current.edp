@@ -352,7 +352,7 @@ for(int iIter = 0; iIter < NIterMAX; ++iIter)
 	}
 	// plot(Tcs, wait=true, value=true, fill=true);
 
-	real err = 10 * log10(abs(Tcsold - Tcs) / abs(Tcs));
+	real err = 20 * log10(abs(Tcsold - Tcs) / abs(Tcs));
 
 	cout << "err = " << err << endl;
 
