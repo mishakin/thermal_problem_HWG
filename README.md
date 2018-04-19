@@ -1,2 +1,3 @@
-# thermal_problem_HWG
-Script for thermal analysis of helically corrugated wavguides
+# Thermal problem HWG
+
+Script for thermal analysis of helically corrugated waveguides
